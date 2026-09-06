@@ -80,12 +80,22 @@
   <div class="card">
     <div class="twoCol">
       <div>
-        <label>You are playing</label>
+        <label id="meLbl">You are playing</label>
         <input type="text" id="meIn" list="champs" placeholder="e.g. Ahri" autocomplete="off" autocapitalize="off">
       </div>
       <div>
-        <label>You are against</label>
+        <label id="oppLbl">You are against</label>
         <input type="text" id="oppIn" list="champs" placeholder="e.g. Yasuo" autocomplete="off" autocapitalize="off">
+      </div>
+    </div>
+    <div class="twoCol" id="duoRow" style="display:none">
+      <div>
+        <label>Your support</label>
+        <input type="text" id="meSupIn" list="champs" placeholder="e.g. Thresh" autocomplete="off" autocapitalize="off">
+      </div>
+      <div>
+        <label>Their support</label>
+        <input type="text" id="oppSupIn" list="champs" placeholder="e.g. Lulu" autocomplete="off" autocapitalize="off">
       </div>
     </div>
     <datalist id="champs"></datalist>
@@ -100,7 +110,7 @@
 
   <div class="foot">Build and win rate data from the OP.GG champion stats API (global ranked, all elos, current patch).<br>
   Champion kits, items, and runes from Riot Data Dragon / CommunityDragon.<br>
-  Lane advice is generated from each champion's actual kit (ranges, cooldowns, abilities) plus these stats. Not affiliated with Riot Games or OP.GG.</div>
+  Lane advice is generated from each champion's actual kit (ranges, cooldowns, abilities) plus these stats. Bot lane is a 2v2 view: pick all four champions. Not affiliated with Riot Games or OP.GG.</div>
 </div>
 
 <script id="logic">
@@ -193,7 +203,7 @@ async function getKit(champId){
 /* ---------- kit analysis ---------- */
 const RX = {
   mobility: /(dash|blink|leap|lunge|teleport|rush|charge|hop|vault|pounce|soar|dives?\b|shift)/i,
-  hardCC: /(stun|root|snare|knock|suppress|charm|taunt|fear|sleep|drowsy|pull|hook|stasis|banish|polymorph|airborne)/i,
+  hardCC: /(stun|root|snare|knock|suppress|charm|taunt|fear|sleep|drowsy|pull|hook|stasis|banish|polymorph|airborne|immobiliz|bind)/i,
   slow: /(slow|cripple|chill)/i,
   sustain: /(\bheal(s|ed|ing)?\b|restore[sd]? [^\.]{0,25}health|lifesteal|omnivamp|regenerat|drain(s|ing)? (life|health)|absorbs? [^\.]{0,15}health)/i,
   shields: /(shield|barrier)/i,
@@ -237,8 +247,10 @@ function analyzeKit(detail){
 }
 function firstOf(arr){ return arr && arr.length ? arr[0] : null; }
 function mainCatch(kit){
-  // enemy's main way to start or win a trade: hard CC or gap close, prefer longest rank-1 cd
-  const cands = (kit.hardCC.concat(kit.mobility)).filter(s => s.key !== "P" && s.key !== "R");
+  // enemy's main way to start or win a trade: prefer hard CC (the real fight-starter), then gap close; longest rank-1 cd first
+  const cc = kit.hardCC.filter(s => s.key !== "P" && s.key !== "R");
+  const mob = kit.mobility.filter(s => s.key !== "P" && s.key !== "R");
+  const cands = cc.length ? cc : mob;
   if(!cands.length) return null;
   cands.sort((a,b)=> (b.cd1 - a.cd1));
   return cands[0];
@@ -364,9 +376,73 @@ function buildAdvice(me, opp, myKit, oppKit, myData, oppData, myLane){
   return {trading: trading.slice(0,5), wave: wave.slice(0,3), curve: curve.slice(0,4)};
 }
 
+
+/* ---------- 2v2 (bot duo) advice ---------- */
+function buildDuoAdvice(n, mk){
+  // n: {meAdc, meSup, oppAdc, oppSup} display names; mk: same keys -> analyzed kits
+  const engage = [], wave = [], early = [];
+  const ccCount = (k) => k.hardCC.length;
+  const mine = {cc: ccCount(mk.meAdc) + ccCount(mk.meSup), push: mk.meAdc.pushScore + mk.meSup.pushScore};
+  const theirs = {cc: ccCount(mk.oppAdc) + ccCount(mk.oppSup), push: mk.oppAdc.pushScore + mk.oppSup.pushScore};
+  const myEng = mainCatch(mk.meSup) || mainCatch(mk.meAdc);
+  const opEng = mainCatch(mk.oppSup) || mainCatch(mk.oppAdc);
+  const myEngOwner = mainCatch(mk.meSup) ? n.meSup : n.meAdc;
+  const opEngOwner = mainCatch(mk.oppSup) ? n.oppSup : n.oppAdc;
+
+  if(myEng && opEng){
+    engage.push("Key engage spells: theirs is <b>" + opEngOwner + "'s " + opEng.name + " (" + opEng.key + ")</b>" + (opEng.cd1 ? " - " + opEng.cd1 + "s cooldown rank 1" : "") + "; yours is <b>" + myEngOwner + "'s " + myEng.name + " (" + myEng.key + ")</b>. When their engage is down, your duo steps up and trades or zones. When it is up, respect it and farm at range.");
+  } else if(opEng){
+    engage.push("Their kill threat starts with <b>" + opEngOwner + "'s " + opEng.name + " (" + opEng.key + ")</b>" + (opEng.cd1 ? " - " + opEng.cd1 + "s cooldown rank 1" : "") + ". Track it every trade: it being down is your green light, it being up means no walking up side by side.");
+  } else if(myEng){
+    engage.push("They have no reliable engage spell. Your <b>" + myEngOwner + "'s " + myEng.name + " (" + myEng.key + ")</b> is the only real pick tool in the lane - every time it is up, look to start a fight on your terms.");
+  }
+  if(mine.cc >= theirs.cc + 2){
+    engage.push("Your duo has the crowd-control edge (" + mine.cc + " CC spells across your kits vs their " + theirs.cc + "). Force fights: chain your CC back to back and they cannot trade through it.");
+  } else if(theirs.cc >= mine.cc + 2){
+    engage.push("Their duo has the crowd-control edge (" + theirs.cc + " CC spells vs your " + mine.cc + "). Never walk up in the open together - stagger your positioning so one CC chain cannot catch you both, and punish only after their key CC is spent.");
+  }
+  const mySust = firstOf(mk.meAdc.sustain) || firstOf(mk.meSup.sustain);
+  const opSust = firstOf(mk.oppAdc.sustain) || firstOf(mk.oppSup.sustain);
+  if(mySust && !opSust){
+    engage.push("Your side has the sustain (" + mySust.name + "). Take repeated short trades - even HP swings in your favor over time, so keep the lane scrappy.");
+  } else if(opSust && !mySust){
+    engage.push("Their side outsustains you (" + opSust.name + "). Chip trades just heal back - hold everything for one full-commit all-in with both of you hitting the same target.");
+  }
+  if(!engage.length){
+    engage.push("Neither duo has a clear engage or sustain edge. Trade as a unit: both of you hit the same target when their damage spell is down, and never trade 1v2.");
+  }
+  engage.push("At level 6, count both of their ults, not just one. A 2v2 where only one duo has both ults is usually decided before the first spell lands - ping each other and either force it together or back off together.");
+
+  const pDiff = mine.push - theirs.push;
+  if(pDiff >= 2.5){
+    wave.push("Your duo out-pushes them. Shove waves 1 and 2 hard to win the level-2 race, crash wave 3 (cannon) into their tower, then ward river and recall or poke them under turret.");
+  } else if(pDiff <= -2.5){
+    wave.push("They out-push your duo. Do not match a losing shove - trim the wave so it never fully crashes, hold it just outside your tower range, and let them overextend where a gank can reach them.");
+  } else {
+    wave.push("Push power is about even. Match their shove so the wave stays mid: whoever lets it crash into their own tower loses the level-2 race and the first real trade.");
+  }
+  wave.push("In a 2v2 the wave is a shared job: your support should help last-hit under tower and your ADC should help shove before roams or recalls. One person managing the wave alone loses it.");
+
+  const adcDiff = mk.meAdc.range - mk.oppAdc.range;
+  if(adcDiff >= 50){
+    early.push(n.meAdc + " outranges " + n.oppAdc + " (<b>" + Math.round(mk.meAdc.range) + "</b> vs " + Math.round(mk.oppAdc.range) + " attack range). Auto them every time they step up for a last hit while " + n.meSup + " holds bush control so they cannot answer.");
+  } else if(adcDiff <= -50){
+    early.push(n.oppAdc + " outranges " + n.meAdc + " (<b>" + Math.round(mk.oppAdc.range) + "</b> vs " + Math.round(mk.meAdc.range) + "). " + n.meAdc + " should give CS rather than eat free autos - this lane is won by " + n.meSup + "'s engage, not by poking.");
+  }
+  early.push("Level 2 decides bot lane: it hits off the first wave plus the three melee minions of wave 2. If you are winning the push, both of you step up the instant it pops and force the fight. If you are losing it, back off before they hit 2 - not after.");
+  const mySupEnchanter = (mk.meSup.sustain.length + mk.meSup.shields.length) >= 2;
+  const opSupEnchanter = (mk.oppSup.sustain.length + mk.oppSup.shields.length) >= 2;
+  if(mySupEnchanter && !opSupEnchanter){
+    early.push(n.meSup + " plays the enchanter role here, so your duo's plan is survive-and-scale: stay even in CS, spend " + n.meSup + "'s cooldowns on whoever their engage lands on, and you win the long lane.");
+  } else if(opSupEnchanter && !mySupEnchanter){
+    early.push("Their " + n.oppSup + " is the enchanter, which means they want a long, even lane. Deny that: your window is early levels before the heals and shields scale, so fight hard before first base.");
+  }
+  return {engage: engage.slice(0,4), wave: wave.slice(0,2), early: early.slice(0,3)};
+}
+
 /* ---------- node test export ---------- */
 if(typeof module !== "undefined"){
-  module.exports = {loadStatic, resolveChamp, getChampData, getKit, analyzeKit, buildAdvice, counterEntry, laneStats, mainCatch, normName,
+  module.exports = {loadStatic, resolveChamp, getChampData, getKit, analyzeKit, buildAdvice, buildDuoAdvice, counterEntry, laneStats, mainCatch, normName,
     _state: () => ({PATCH, CHAMPS: CHAMPS.length})};
 }
 </script>
@@ -389,25 +465,35 @@ async function boot(){
   $("champs").innerHTML = CHAMPS.map(c => '<option value="'+esc(c.name)+'">').join("");
   booted = true;
   $("goBtn").disabled = false; $("goBtn").textContent = "Get matchup guide";
+  const hb = location.hash.match(/^#\/?bot\/([^/]+)\/([^/]+)\/([^/]+)\/([^/]+)/);
+  if(hb){
+    $("meIn").value = decodeURIComponent(hb[1]);
+    $("meSupIn").value = decodeURIComponent(hb[2]);
+    $("oppIn").value = decodeURIComponent(hb[3]);
+    $("oppSupIn").value = decodeURIComponent(hb[4]);
+    currentLane = "adc";
+    renderLanes();
+    run();
+    return;
+  }
   const h = location.hash.match(/^#\/?([^/]+)\/([^/]+)(?:\/(\w+))?/);
   if(h){
     $("meIn").value = decodeURIComponent(h[1]);
     $("oppIn").value = decodeURIComponent(h[2]);
     if(h[3]) currentLane = h[3].toLowerCase();
-    renderLanes($("meIn").value);
+    renderLanes();
     run();
   }
 }
 
-function renderLanes(meName){
-  const c = resolveChamp(meName);
-  let lanes = LANES;
-  if(c && OPGG_POSITIONS[c.key] && OPGG_POSITIONS[c.key].length){
-    lanes = OPGG_POSITIONS[c.key].map(l => l.toLowerCase()).filter(l => LANES.includes(l));
-  }
-  if(!lanes.includes(currentLane)) currentLane = lanes[0] || "mid";
-  $("laneRow").innerHTML = lanes.map(l => '<button class="lane'+(l===currentLane?" on":"")+'" data-lane="'+l+'">'+LANES_LABEL[l]+"</button>").join("");
-  $("laneRow").querySelectorAll(".lane").forEach(b => b.onclick = () => { currentLane = b.dataset.lane; renderLanes(meName); });
+function renderLanes(){
+  if(!LANES.includes(currentLane)) currentLane = "mid";
+  $("laneRow").innerHTML = LANES.map(l => '<button class="lane'+(l===currentLane?" on":"")+'" data-lane="'+l+'">'+LANES_LABEL[l]+"</button>").join("");
+  $("laneRow").querySelectorAll(".lane").forEach(b => b.onclick = () => { currentLane = b.dataset.lane; renderLanes(); });
+  const duo = currentLane === "adc";
+  $("duoRow").style.display = duo ? "" : "none";
+  $("meLbl").textContent = duo ? "Your ADC" : "You are playing";
+  $("oppLbl").textContent = duo ? "Their ADC" : "You are against";
 }
 
 function err(msg){ $("errBox").innerHTML = '<div class="err">'+esc(msg)+"</div>"; }
@@ -450,77 +536,43 @@ function render(data){
   $("results").scrollIntoView({behavior:"smooth", block:"start"});
 }
 
-async function run(){
-  clearErr();
-  const meName = $("meIn").value.trim(), oppName = $("oppIn").value.trim();
-  const me = resolveChamp(meName), opp = resolveChamp(oppName);
-  if(!me || !opp){ err("Pick both champions from the list (type to search)."); return; }
-  if(me.key === opp.key){ err("Pick two different champions."); return; }
-  location.hash = "/" + encodeURIComponent(me.name) + "/" + encodeURIComponent(opp.name) + "/" + currentLane;
-  render('<div class="load">Crunching ' + esc(me.name) + " vs " + esc(oppName) + " in " + esc(LANES_LABEL[currentLane]||currentLane) + "...</div>");
-  try{
-    let myData, lane = currentLane;
-    try{ myData = await getChampData(me.key, lane); }
-    catch(e){
-      const fb = (OPGG_POSITIONS[me.key]||[]).map(l=>l.toLowerCase()).find(l => l !== lane && LANES.includes(l));
-      if(!fb) throw e;
-      lane = fb; currentLane = fb;
-      myData = await getChampData(me.key, lane);
-    }
-    let oppData = null;
-    try{ oppData = await getChampData(opp.key, lane); }catch(e){ /* enemy might not play this lane */ }
-    const [myKitD, oppKitD] = await Promise.all([getKit(me.id), getKit(opp.id)]);
-    const myKit = analyzeKit(myKitD), oppKit = analyzeKit(oppKitD);
-    const verdict = matchupVerdict(myData, oppData, me.key, opp.key);
-    const advice = buildAdvice(me.name, opp.name, myKit, oppKit, myData, oppData, lane);
-    render(renderAll(me, opp, lane, myData, oppData, myKit, oppKit, verdict, advice));
-  }catch(e){
-    console.error(e);
-    render("");
-    err("Could not load stats for that combination (OP.GG may not track one of these champs in " + (LANES_LABEL[currentLane]||currentLane) + "). Try another lane or champion.");
-  }
+function knownLanesNote(champ){
+  const known = (OPGG_POSITIONS[champ.key]||[]).map(l=>l.toLowerCase()).filter(l=>LANES.includes(l));
+  return known.length ? " (OP.GG tracks " + champ.name + " in: " + known.map(l=>LANES_LABEL[l]).join(", ") + ")" : "";
 }
 
-function renderAll(me, opp, lane, myData, oppData, myKit, oppKit, verdict, advice){
-  const myLS = laneStats(myData, lane);
-  const oppLS = oppData ? laneStats(oppData, lane) : null;
-  const meImg = DDR + "/cdn/" + PATCH + "/img/champion/" + me.id + ".png";
-  const oppImg = DDR + "/cdn/" + PATCH + "/img/champion/" + opp.id + ".png";
-
-  let v = '<div class="card">';
-  v += '<div class="rowheads">';
-  v += '<div class="champHead">'+img(meImg,"",me.name)+'<div><div class="n">'+esc(me.name)+'</div><div class="s">'+esc(LANES_LABEL[lane]||lane)+(myLS ? " - "+pct(myLS.win_rate)+"% WR"+(myLS.tier_data&&myLS.tier_data.rank?", #"+myLS.tier_data.rank+" in lane":"") : "")+'</div></div></div>';
-  v += '<div class="vs">VS</div>';
-  v += '<div class="champHead"><div style="text-align:right"><div class="n">'+esc(opp.name)+'</div><div class="s">'+(oppLS ? pct(oppLS.win_rate)+"% WR in "+esc(LANES_LABEL[lane]||lane) : "no lane data")+'</div></div>'+img(oppImg,"",opp.name)+"</div>";
-  v += "</div>";
+function verdictHtml(verdict, oppName, laneLabel){
   if(verdict){
     const [lbl, cls] = wrLabel(verdict.wr);
-    v += '<div class="wrBig"><div class="pct" style="color:'+(verdict.wr>=.5?"var(--good)":"var(--bad)")+'">'+pct(verdict.wr)+'%</div>';
-    v += '<div class="lbl">your win rate vs '+esc(opp.name)+" ("+verdict.games.toLocaleString()+" ranked games, "+esc(LANES_LABEL[lane]||lane)+")</div>";
+    let v = '<div class="wrBig"><div class="pct" style="color:'+(verdict.wr>=.5?"var(--good)":"var(--bad)")+'">'+pct(verdict.wr)+'%</div>';
+    v += '<div class="lbl">your win rate vs '+esc(oppName)+" ("+verdict.games.toLocaleString()+" ranked games, "+esc(laneLabel)+")</div>";
     v += '<div><span class="pill '+cls+'">'+lbl+"</span></div>";
     if(verdict.games < 300) v += '<div class="stat" style="margin-top:6px">Small sample - treat this as a best guess.</div>';
     v += "</div>";
-  } else {
-    v += '<div class="wrBig"><div class="lbl" style="margin-top:8px">Not enough direct matchup data between these two in '+esc(LANES_LABEL[lane]||lane)+". Treat it as a skill matchup and lean on the advice below.</div></div>";
+    return v;
   }
-  // game length bars
+  return '<div class="wrBig"><div class="lbl" style="margin-top:8px">Not enough direct matchup data between these two in '+esc(laneLabel)+". Treat it as a skill matchup and lean on the advice below.</div></div>";
+}
+
+function glBarsHtml(myName, oppName, myData, oppData){
   const gl = (data) => ((data||{}).game_lengths)||[];
   const myGL = gl(myData), oppGL = gl(oppData);
-  if(myGL.length && oppGL.length){
-    v += '<h3>Win rate by game length</h3>';
-    for(const len of [25,30,35,40]){
-      const a = myGL.find(g=>g.game_length===len), b = oppGL.find(g=>g.game_length===len);
-      if(!a || !b) continue;
-      v += '<div class="barRow"><div class="t">'+len+' min</div><div class="bars">'+
-           '<div class="bar"><i class="me" style="width:'+Math.round(a.rate*100)+'%"></i></div>'+
-           '<div class="bar"><i class="him" style="width:'+Math.round(b.rate*100)+'%"></i></div>'+
-           '</div></div>';
-    }
-    v += '<div class="legend"><span><b style="background:var(--accent)"></b>'+esc(me.name)+'</span><span><b style="background:#c0567a"></b>'+esc(opp.name)+"</span></div>";
+  if(!myGL.length || !oppGL.length) return "";
+  let rows = "";
+  for(const len of [25,30,35,40]){
+    const a = myGL.find(g=>g.game_length===len), b = oppGL.find(g=>g.game_length===len);
+    if(!a || !b) continue;
+    rows += '<div class="barRow"><div class="t">'+len+' min</div><div class="bars">'+
+         '<div class="bar"><i class="me" style="width:'+Math.round(a.rate*100)+'%"></i></div>'+
+         '<div class="bar"><i class="him" style="width:'+Math.round(b.rate*100)+'%"></i></div>'+
+         '</div></div>';
   }
-  v += "</div>";
+  if(!rows) return "";
+  return '<h3>Win rate by game length</h3>' + rows +
+    '<div class="legend"><span><b style="background:var(--accent)"></b>'+esc(myName)+'</span><span><b style="background:#c0567a"></b>'+esc(oppName)+"</span></div>";
+}
 
-  // build card
+function buildCardHtml(me, myData){
   let b = '<div class="card"><h3 style="margin-top:0">Recommended build - '+esc(me.name)+'</h3>';
   const ss = (myData.summoner_spells||[])[0];
   if(ss){
@@ -561,21 +613,142 @@ function renderAll(me, opp, lane, myData, oppData, myKit, oppKit, verdict, advic
     b += '<h3>Situational / late</h3><div class="icons">'+last.map(li => itemCells(li.ids)+'<span class="stat">'+pct(li.pick_rate)+'%</span>').join("")+'</div>';
   }
   b += "</div>";
+  return b;
+}
 
-  // advice card
+async function run(){
+  clearErr();
+  if(currentLane === "adc") return runDuo();
+  const meName = $("meIn").value.trim(), oppName = $("oppIn").value.trim();
+  const me = resolveChamp(meName), opp = resolveChamp(oppName);
+  if(!me || !opp){ err("Pick both champions from the list (type to search)."); return; }
+  if(me.key === opp.key){ err("Pick two different champions."); return; }
+  location.hash = "/" + encodeURIComponent(me.name) + "/" + encodeURIComponent(opp.name) + "/" + currentLane;
+  render('<div class="load">Crunching ' + esc(me.name) + " vs " + esc(opp.name) + " in " + esc(LANES_LABEL[currentLane]||currentLane) + "...</div>");
+  try{
+    let myData;
+    try{ myData = await getChampData(me.key, currentLane); }
+    catch(e){
+      render("");
+      err("OP.GG has no ranked data for " + me.name + " in " + LANES_LABEL[currentLane] + " this patch" + knownLanesNote(me) + ". Pick another lane.");
+      return;
+    }
+    let oppData = null;
+    try{ oppData = await getChampData(opp.key, currentLane); }catch(e){ /* enemy might not play this lane */ }
+    const [myKitD, oppKitD] = await Promise.all([getKit(me.id), getKit(opp.id)]);
+    const myKit = analyzeKit(myKitD), oppKit = analyzeKit(oppKitD);
+    const verdict = matchupVerdict(myData, oppData, me.key, opp.key);
+    const advice = buildAdvice(me.name, opp.name, myKit, oppKit, myData, oppData, currentLane);
+    render(renderAll(me, opp, currentLane, myData, oppData, myKit, oppKit, verdict, advice));
+  }catch(e){
+    console.error(e);
+    render("");
+    err("Could not load stats for that combination. Try another lane or champion.");
+  }
+}
+
+async function runDuo(){
+  clearErr();
+  const meAdc = resolveChamp($("meIn").value.trim());
+  const meSup = resolveChamp($("meSupIn").value.trim());
+  const oppAdc = resolveChamp($("oppIn").value.trim());
+  const oppSup = resolveChamp($("oppSupIn").value.trim());
+  if(!meAdc || !meSup || !oppAdc || !oppSup){
+    err("Bot lane is a 2v2 here: pick all four champions from the list - your ADC, your support, their ADC, and their support.");
+    return;
+  }
+  const keys = [meAdc.key, meSup.key, oppAdc.key, oppSup.key];
+  if(new Set(keys).size !== keys.length){ err("Each champion can only appear once."); return; }
+  location.hash = "/bot/" + [meAdc.name, meSup.name, oppAdc.name, oppSup.name].map(c => encodeURIComponent(c)).join("/");
+  render('<div class="load">Crunching the 2v2: ' + esc(meAdc.name) + " + " + esc(meSup.name) + " vs " + esc(oppAdc.name) + " + " + esc(oppSup.name) + "...</div>");
+  try{
+    let meAdcD, meSupD;
+    try{ meAdcD = await getChampData(meAdc.key, "adc"); }
+    catch(e){ render(""); err("OP.GG has no ranked ADC data for " + meAdc.name + " this patch" + knownLanesNote(meAdc) + "."); return; }
+    try{ meSupD = await getChampData(meSup.key, "support"); }
+    catch(e){ render(""); err("OP.GG has no ranked Support data for " + meSup.name + " this patch" + knownLanesNote(meSup) + "."); return; }
+    let oppAdcD = null, oppSupD = null;
+    try{ oppAdcD = await getChampData(oppAdc.key, "adc"); }catch(e){}
+    try{ oppSupD = await getChampData(oppSup.key, "support"); }catch(e){}
+    const kitDs = await Promise.all([getKit(meAdc.id), getKit(meSup.id), getKit(oppAdc.id), getKit(oppSup.id)]);
+    const kits = {meAdc: analyzeKit(kitDs[0]), meSup: analyzeKit(kitDs[1]), oppAdc: analyzeKit(kitDs[2]), oppSup: analyzeKit(kitDs[3])};
+    const vAdc = oppAdcD ? matchupVerdict(meAdcD, oppAdcD, meAdc.key, oppAdc.key) : null;
+    const vSup = oppSupD ? matchupVerdict(meSupD, oppSupD, meSup.key, oppSup.key) : null;
+    const duoAdvice = buildDuoAdvice(
+      {meAdc: meAdc.name, meSup: meSup.name, oppAdc: oppAdc.name, oppSup: oppSup.name}, kits);
+    render(renderDuoAll({meAdc, meSup, oppAdc, oppSup}, {meAdcD, meSupD, oppAdcD, oppSupD}, kits, vAdc, vSup, duoAdvice));
+  }catch(e){
+    console.error(e);
+    render("");
+    err("Could not load stats for that combination. Try other champions.");
+  }
+}
+
+function renderAll(me, opp, lane, myData, oppData, myKit, oppKit, verdict, advice){
+  const myLS = laneStats(myData, lane);
+  const oppLS = oppData ? laneStats(oppData, lane) : null;
+  const meImg = DDR + "/cdn/" + PATCH + "/img/champion/" + me.id + ".png";
+  const oppImg = DDR + "/cdn/" + PATCH + "/img/champion/" + opp.id + ".png";
+
+  let v = '<div class="card">';
+  v += '<div class="rowheads">';
+  v += '<div class="champHead">'+img(meImg,"",me.name)+'<div><div class="n">'+esc(me.name)+'</div><div class="s">'+esc(LANES_LABEL[lane]||lane)+(myLS ? " - "+pct(myLS.win_rate)+"% WR"+(myLS.tier_data&&myLS.tier_data.rank?", #"+myLS.tier_data.rank+" in lane":"") : "")+'</div></div></div>';
+  v += '<div class="vs">VS</div>';
+  v += '<div class="champHead"><div style="text-align:right"><div class="n">'+esc(opp.name)+'</div><div class="s">'+(oppLS ? pct(oppLS.win_rate)+"% WR in "+esc(LANES_LABEL[lane]||lane) : "no lane data")+'</div></div>'+img(oppImg,"",opp.name)+"</div>";
+  v += "</div>";
+  v += verdictHtml(verdict, opp.name, LANES_LABEL[lane]||lane);
+  if(oppData) v += glBarsHtml(me.name, opp.name, myData, oppData);
+  v += "</div>";
+
   let a = '<div class="card"><h3 style="margin-top:0">Matchup advice</h3>';
-  const sec = (title, items) => '<h3>'+title+'</h3><ul class="advice">'+items.map(x=>"<li>"+x+"</li>").join("")+"</ul>";
+  const sec = (title, items) => items.length ? '<h3>'+title+'</h3><ul class="advice">'+items.map(x=>"<li>"+x+"</li>").join("")+"</ul>" : "";
   a += sec("When to trade", advice.trading);
   a += sec("Wave management", advice.wave);
   a += sec("Strong vs weak", advice.curve);
   a += "</div>";
-  return v + b + a;
+  return v + buildCardHtml(me, myData) + a;
+}
+
+function renderDuoAll(c, d, kits, vAdc, vSup, duoAdvice){
+  const imgOf = (champ) => DDR + "/cdn/" + PATCH + "/img/champion/" + champ.id + ".png";
+  const adcLS = laneStats(d.meAdcD, "adc");
+  const supLS = laneStats(d.meSupD, "support");
+  const oAdcLS = d.oppAdcD ? laneStats(d.oppAdcD, "adc") : null;
+  const oSupLS = d.oppSupD ? laneStats(d.oppSupD, "support") : null;
+  const duoSub = (a, s) => (a ? pct(a.win_rate)+"% ADC WR" : "") + (a && s ? ", " : "") + (s ? pct(s.win_rate)+"% Sup WR" : "") || "no lane data";
+
+  let v = '<div class="card">';
+  v += '<div class="rowheads">';
+  v += '<div class="champHead">'+img(imgOf(c.meAdc),"",c.meAdc.name)+img(imgOf(c.meSup),"",c.meSup.name)
+      +'<div><div class="n">'+esc(c.meAdc.name)+" + "+esc(c.meSup.name)+'</div><div class="s">your duo - '+duoSub(adcLS, supLS)+'</div></div></div>';
+  v += '<div class="vs">VS</div>';
+  v += '<div class="champHead"><div style="text-align:right"><div class="n">'+esc(c.oppAdc.name)+" + "+esc(c.oppSup.name)+'</div><div class="s">their duo - '+duoSub(oAdcLS, oSupLS)+'</div></div>'
+      +img(imgOf(c.oppAdc),"",c.oppAdc.name)+img(imgOf(c.oppSup),"",c.oppSup.name)+"</div>";
+  v += "</div>";
+  v += '<h3>ADC matchup - '+esc(c.meAdc.name)+" vs "+esc(c.oppAdc.name)+"</h3>";
+  v += verdictHtml(vAdc, c.oppAdc.name, "ADC");
+  v += '<h3>Support matchup - '+esc(c.meSup.name)+" vs "+esc(c.oppSup.name)+"</h3>";
+  v += verdictHtml(vSup, c.oppSup.name, "Support");
+  v += '<div class="stat" style="margin-top:4px">These are the per-role matchup win rates; OP.GG does not publish combined 2v2 stats.</div>';
+  if(d.oppAdcD) v += glBarsHtml(c.meAdc.name, c.oppAdc.name, d.meAdcD, d.oppAdcD);
+  v += "</div>";
+
+  let a = '<div class="card"><h3 style="margin-top:0">2v2 advice</h3>';
+  const sec = (title, items) => items.length ? '<h3>'+title+'</h3><ul class="advice">'+items.map(x=>"<li>"+x+"</li>").join("")+"</ul>" : "";
+  a += sec("Engage and kill threat", duoAdvice.engage);
+  a += sec("Wave management", duoAdvice.wave);
+  a += sec("Early game", duoAdvice.early);
+  a += "</div>";
+  return v + a + buildCardHtml(c.meAdc, d.meAdcD) + buildCardHtml(c.meSup, d.meSupD);
 }
 
 $("goBtn").onclick = run;
-$("swapBtn").onclick = () => { const t = $("meIn").value; $("meIn").value = $("oppIn").value; $("oppIn").value = t; renderLanes($("meIn").value); };
-$("meIn").addEventListener("change", () => renderLanes($("meIn").value));
-renderLanes("");
+$("swapBtn").onclick = () => {
+  const a = $("meIn").value, b = $("meSupIn").value;
+  $("meIn").value = $("oppIn").value; $("meSupIn").value = $("oppSupIn").value;
+  $("oppIn").value = a; $("oppSupIn").value = b;
+};
+renderLanes();
 boot().catch(e => { console.error(e); err("Failed to load champion data. Check your connection and reload."); $("goBtn").textContent = "Retry"; $("goBtn").disabled = false; $("goBtn").onclick = () => location.reload(); });
 </script>
 </body>

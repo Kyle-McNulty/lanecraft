@@ -16,6 +16,13 @@ Open https://kyle-mcnulty.github.io/lanecraft/ on any browser. Everything loads 
 
 You can share a matchup: the URL hash holds it, e.g. `#/Ahri/Yasuo/mid` for a 1v1 or `#/bot/Jinx/Thresh/Caitlyn/Lux` for a bot 2v2.
 
+## Architecture
+
+- Static site on GitHub Pages (this repo's `index.html`).
+- `api/advice.js` is a Vercel serverless function that generates the AI coach breakdown via OpenRouter. The OpenRouter API key lives ONLY as a Vercel environment variable (`OPENROUTER_API_KEY`) - never in this repo, never sent to the browser. CORS is locked to `https://kyle-mcnulty.github.io`.
+- Advice is cached per matchup + patch (Upstash Redis, 14-day TTL; in-memory fallback) and in the browser's localStorage, so each matchup costs one LLM call per patch, not one per page view.
+- Model: `openai/gpt-4o-mini` (override with the `OPENROUTER_MODEL` env var), with automatic fallbacks. If the proxy is unreachable, the page falls back to a built-in rules engine so advice always renders.
+
 ## Data sources (all live, no API key needed)
 
 - Builds, matchup win rates, game-length curves: OP.GG champion stats API (global ranked, all elos, current patch 16.17)

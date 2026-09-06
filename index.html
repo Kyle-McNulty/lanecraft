@@ -110,7 +110,7 @@
 
   <div class="foot">Build and win rate data from the OP.GG champion stats API (global ranked, all elos, current patch).<br>
   Champion kits, items, and runes from Riot Data Dragon / CommunityDragon.<br>
-  Lane advice is generated from each champion's actual kit (ranges, cooldowns, abilities) plus these stats. Bot lane is a 2v2 view: pick all four champions. Not affiliated with Riot Games or OP.GG.</div>
+  Matchup advice is written by an AI coach (OpenRouter) fed with these live stats; a built-in rules engine covers any outage. Bot lane is a 2v2 view: pick all four champions. Not affiliated with Riot Games or OP.GG.</div>
 </div>
 
 <script id="logic">
@@ -451,6 +451,7 @@ if(typeof module !== "undefined"){
 "use strict";
 const $ = (id) => document.getElementById(id);
 const LANES_LABEL = {top:"Top", jungle:"Jungle", mid:"Mid", adc:"ADC", support:"Support"};
+const ADVICE_API = "https://lanecraft.vercel.app/api/advice"; // serverless proxy - the OpenRouter key lives server-side only, never in this file
 let currentLane = "mid";
 let booted = false;
 
@@ -616,6 +617,71 @@ function buildCardHtml(me, myData){
   return b;
 }
 
+
+/* ---------- AI advice (LLM via serverless proxy; rule-based engine as fallback) ---------- */
+function kitFacts(kit){
+  const c = mainCatch(kit);
+  return {
+    name: kit.name, tags: kit.tags, range: kit.range, partype: kit.partype,
+    catchSpell: c ? {name: c.name, key: c.key, cooldown: c.cd1} : null,
+    ult: kit.ult ? {name: kit.ult.name, cooldown: kit.ult.cd1} : null,
+    ccCount: kit.hardCC.length, mobilityCount: kit.mobility.length,
+    sustainName: kit.sustain.length ? kit.sustain[0].name : null,
+    pushScore: kit.pushScore,
+  };
+}
+function dataFacts(data, lane){
+  if(!data) return {};
+  const ls = laneStats(data, lane);
+  const names = (ids) => (ids||[]).map(id => (ITEMS[id] ? ITEMS[id].name : null)).filter(Boolean);
+  const core = (data.core_items||[])[0];
+  const start = (data.starter_items||[])[0];
+  const boots = (data.boots||[])[0];
+  const rp = (data.rune_pages||[])[0];
+  const sm = (data.skill_masteries||[])[0];
+  return {
+    laneWR: ls ? Number(pct(ls.win_rate)) : null,
+    laneRank: ls && ls.tier_data ? ls.tier_data.rank : null,
+    glCurve: ((data.game_lengths)||[]).map(g => ({minutes: g.game_length, winRate: Number(pct(g.rate))})),
+    build: {start: start ? names(start.ids) : [], core: core ? names(core.ids) : [], boots: boots ? names(boots.ids) : []},
+    runes: rp && rp.builds && rp.builds[0] ? rp.builds[0].primary_rune_ids.map(id => (PERKS[String(id)]||{}).name).filter(Boolean) : [],
+    skillMax: sm ? sm.ids : [],
+  };
+}
+async function fetchLlmAdvice(payload){
+  const ck = "lc:adv:v3:" + JSON.stringify([payload.patch, payload.mode, payload.lane, payload.me.name, payload.opp.name,
+    payload.meSup && payload.meSup.name, payload.oppSup && payload.oppSup.name]);
+  try{
+    const raw = store.getItem(ck);
+    if(raw){ const o = JSON.parse(raw); if(Date.now() - o.t < 12*3600*1000) return o.d; }
+  }catch(e){}
+  const r = await fetch(ADVICE_API, {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(payload)});
+  if(!r.ok) throw new Error("advice proxy HTTP " + r.status);
+  const d = await r.json();
+  if(!d || !d.advice) throw new Error("bad advice payload");
+  try{ store.setItem(ck, JSON.stringify({t: Date.now(), d: d.advice})); }catch(e){}
+  return d.advice;
+}
+function adviceCardShell(){
+  return '<div class="card" id="adviceCard"><h3 style="margin-top:0">AI coach breakdown</h3><div class="load">Asking the coach...</div></div>';
+}
+function adviceCardHtml(title, summary, sections, trusted){
+  // LLM output is always escaped; only our own rule-based engine's markup passes trusted=true
+  const item = (x) => trusted ? x : esc(x);
+  let a = '<div class="card" id="adviceCard"><h3 style="margin-top:0">'+esc(title)+'</h3>';
+  if(summary) a += '<div style="margin-bottom:6px"><b>'+esc(summary)+'</b></div>';
+  for(const [t, items] of sections){
+    if(!items || !items.length) continue;
+    a += '<h3>'+esc(t)+'</h3><ul class="advice">'+items.map(x=>'<li>'+item(x)+'</li>').join("")+'</ul>';
+  }
+  a += "</div>";
+  return a;
+}
+function swapAdviceCard(html){
+  const el = $("adviceCard");
+  if(el) el.outerHTML = html; else $("results").insertAdjacentHTML("beforeend", html);
+}
+
 async function run(){
   clearErr();
   if(currentLane === "adc") return runDuo();
@@ -638,8 +704,22 @@ async function run(){
     const [myKitD, oppKitD] = await Promise.all([getKit(me.id), getKit(opp.id)]);
     const myKit = analyzeKit(myKitD), oppKit = analyzeKit(oppKitD);
     const verdict = matchupVerdict(myData, oppData, me.key, opp.key);
-    const advice = buildAdvice(me.name, opp.name, myKit, oppKit, myData, oppData, currentLane);
-    render(renderAll(me, opp, currentLane, myData, oppData, myKit, oppKit, verdict, advice));
+    render(renderAll(me, opp, currentLane, myData, oppData, myKit, oppKit, verdict) + adviceCardShell());
+    const patch = PATCH.replace(/\.1$/,"");
+    const payload = {mode:"solo", lane: currentLane, patch,
+      me: {...kitFacts(myKit), ...dataFacts(myData, currentLane)},
+      opp: {...kitFacts(oppKit), ...dataFacts(oppData, currentLane)},
+      verdict: verdict ? {winRate: Number(pct(verdict.wr)), games: verdict.games} : null};
+    let card;
+    try{
+      const adv = await fetchLlmAdvice(payload);
+      card = adviceCardHtml("AI coach breakdown", adv.summary, [["When to trade", adv.trading], ["Wave management", adv.wave], ["Strong vs weak", adv.curve]]);
+    }catch(e){
+      console.warn("LLM advice failed, using built-in engine", e);
+      const adv = buildAdvice(me.name, opp.name, myKit, oppKit, myData, oppData, currentLane);
+      card = adviceCardHtml("Matchup advice", "", [["When to trade", adv.trading], ["Wave management", adv.wave], ["Strong vs weak", adv.curve]], true);
+    }
+    swapAdviceCard(card);
   }catch(e){
     console.error(e);
     render("");
@@ -674,9 +754,25 @@ async function runDuo(){
     const kits = {meAdc: analyzeKit(kitDs[0]), meSup: analyzeKit(kitDs[1]), oppAdc: analyzeKit(kitDs[2]), oppSup: analyzeKit(kitDs[3])};
     const vAdc = oppAdcD ? matchupVerdict(meAdcD, oppAdcD, meAdc.key, oppAdc.key) : null;
     const vSup = oppSupD ? matchupVerdict(meSupD, oppSupD, meSup.key, oppSup.key) : null;
-    const duoAdvice = buildDuoAdvice(
-      {meAdc: meAdc.name, meSup: meSup.name, oppAdc: oppAdc.name, oppSup: oppSup.name}, kits);
-    render(renderDuoAll({meAdc, meSup, oppAdc, oppSup}, {meAdcD, meSupD, oppAdcD, oppSupD}, kits, vAdc, vSup, duoAdvice));
+    render(renderDuoAll({meAdc, meSup, oppAdc, oppSup}, {meAdcD, meSupD, oppAdcD, oppSupD}, kits, vAdc, vSup) + adviceCardShell());
+    const patch = PATCH.replace(/\.1$/,"");
+    const payload = {mode:"duo", lane: "bot", patch,
+      me: {...kitFacts(kits.meAdc), ...dataFacts(meAdcD, "adc")},
+      meSup: {...kitFacts(kits.meSup), ...dataFacts(meSupD, "support")},
+      opp: {...kitFacts(kits.oppAdc), ...dataFacts(oppAdcD, "adc")},
+      oppSup: {...kitFacts(kits.oppSup), ...dataFacts(oppSupD, "support")},
+      verdict: vAdc ? {winRate: Number(pct(vAdc.wr)), games: vAdc.games} : null,
+      verdictSup: vSup ? {winRate: Number(pct(vSup.wr)), games: vSup.games} : null};
+    let card;
+    try{
+      const adv = await fetchLlmAdvice(payload);
+      card = adviceCardHtml("AI coach breakdown - 2v2", adv.summary, [["Engage and kill threat", adv.trading], ["Wave management", adv.wave], ["Early game and scaling", adv.curve]]);
+    }catch(e){
+      console.warn("LLM advice failed, using built-in engine", e);
+      const adv = buildDuoAdvice({meAdc: meAdc.name, meSup: meSup.name, oppAdc: oppAdc.name, oppSup: oppSup.name}, kits);
+      card = adviceCardHtml("2v2 advice", "", [["Engage and kill threat", adv.engage], ["Wave management", adv.wave], ["Early game", adv.early]], true);
+    }
+    swapAdviceCard(card);
   }catch(e){
     console.error(e);
     render("");
@@ -684,7 +780,7 @@ async function runDuo(){
   }
 }
 
-function renderAll(me, opp, lane, myData, oppData, myKit, oppKit, verdict, advice){
+function renderAll(me, opp, lane, myData, oppData, myKit, oppKit, verdict){
   const myLS = laneStats(myData, lane);
   const oppLS = oppData ? laneStats(oppData, lane) : null;
   const meImg = DDR + "/cdn/" + PATCH + "/img/champion/" + me.id + ".png";
@@ -700,16 +796,10 @@ function renderAll(me, opp, lane, myData, oppData, myKit, oppKit, verdict, advic
   if(oppData) v += glBarsHtml(me.name, opp.name, myData, oppData);
   v += "</div>";
 
-  let a = '<div class="card"><h3 style="margin-top:0">Matchup advice</h3>';
-  const sec = (title, items) => items.length ? '<h3>'+title+'</h3><ul class="advice">'+items.map(x=>"<li>"+x+"</li>").join("")+"</ul>" : "";
-  a += sec("When to trade", advice.trading);
-  a += sec("Wave management", advice.wave);
-  a += sec("Strong vs weak", advice.curve);
-  a += "</div>";
-  return v + buildCardHtml(me, myData) + a;
+  return v + buildCardHtml(me, myData);
 }
 
-function renderDuoAll(c, d, kits, vAdc, vSup, duoAdvice){
+function renderDuoAll(c, d, kits, vAdc, vSup){
   const imgOf = (champ) => DDR + "/cdn/" + PATCH + "/img/champion/" + champ.id + ".png";
   const adcLS = laneStats(d.meAdcD, "adc");
   const supLS = laneStats(d.meSupD, "support");
@@ -733,13 +823,7 @@ function renderDuoAll(c, d, kits, vAdc, vSup, duoAdvice){
   if(d.oppAdcD) v += glBarsHtml(c.meAdc.name, c.oppAdc.name, d.meAdcD, d.oppAdcD);
   v += "</div>";
 
-  let a = '<div class="card"><h3 style="margin-top:0">2v2 advice</h3>';
-  const sec = (title, items) => items.length ? '<h3>'+title+'</h3><ul class="advice">'+items.map(x=>"<li>"+x+"</li>").join("")+"</ul>" : "";
-  a += sec("Engage and kill threat", duoAdvice.engage);
-  a += sec("Wave management", duoAdvice.wave);
-  a += sec("Early game", duoAdvice.early);
-  a += "</div>";
-  return v + a + buildCardHtml(c.meAdc, d.meAdcD) + buildCardHtml(c.meSup, d.meSupD);
+  return v + buildCardHtml(c.meAdc, d.meAdcD) + buildCardHtml(c.meSup, d.meSupD);
 }
 
 $("goBtn").onclick = run;

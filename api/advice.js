@@ -4,7 +4,8 @@
 const { createHash } = require("node:crypto");
 
 const ALLOWED_ORIGIN = "https://kyle-mcnulty.github.io";
-const MODEL = process.env.OPENROUTER_MODEL || "google/gemini-2.0-flash-001";
+const PRIMARY_MODEL = process.env.OPENROUTER_MODEL || "openai/gpt-4o-mini";
+const MODEL_FALLBACKS = ["meta-llama/llama-3.3-70b-instruct", "~google/gemini-flash-latest"];
 const PROMPT_VERSION = "3";
 const CACHE_TTL_SEC = 60 * 60 * 24 * 14; // 14 days, keyed by patch so it self-refreshes
 const RATE_LIMIT_PER_HOUR = 40;
@@ -146,38 +147,43 @@ module.exports = async function handler(req, res) {
     createHash("sha1").update(names.join("|").toLowerCase()).digest("hex").slice(0, 16);
 
   const hit = await kvGet(ck);
-  if (hit) { res.status(200).json({ advice: hit, cached: true, model: MODEL }); return; }
+  if (hit) { res.status(200).json({ advice: hit, cached: true, model: "cache" }); return; }
 
   if (!process.env.OPENROUTER_API_KEY) { res.status(503).json({ error: "advice backend not configured" }); return; }
 
   const { system, user } = buildPrompt(body);
-  try {
-    const r = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        Authorization: "Bearer " + process.env.OPENROUTER_API_KEY,
-        "Content-Type": "application/json",
-        "HTTP-Referer": "https://kyle-mcnulty.github.io/lanecraft/",
-        "X-Title": "LaneCraft",
-      },
-      body: JSON.stringify({
-        model: MODEL,
-        messages: [{ role: "system", content: system }, { role: "user", content: user }],
-        max_tokens: 1100,
-        temperature: 0.4,
-        response_format: { type: "json_object" },
-      }),
-    });
-    if (!r.ok) { res.status(502).json({ error: "llm upstream " + r.status }); return; }
-    const d = await r.json();
-    const text = d && d.choices && d.choices[0] && d.choices[0].message && d.choices[0].message.content;
-    const advice = extractJson(text);
-    if (!advice || (!advice.trading.length && !advice.wave.length && !advice.curve.length)) {
-      res.status(502).json({ error: "llm returned unparseable advice" }); return;
+  const models = [PRIMARY_MODEL].concat(MODEL_FALLBACKS.filter(m => m !== PRIMARY_MODEL));
+  let lastErr = "";
+  for (const model of models) {
+    try {
+      const r = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer " + process.env.OPENROUTER_API_KEY,
+          "Content-Type": "application/json",
+          "HTTP-Referer": "https://kyle-mcnulty.github.io/lanecraft/",
+          "X-Title": "LaneCraft",
+        },
+        body: JSON.stringify({
+          model: model,
+          messages: [{ role: "system", content: system }, { role: "user", content: user }],
+          max_tokens: 1100,
+          temperature: 0.4,
+        }),
+      });
+      if (!r.ok) { lastErr = model + " -> HTTP " + r.status + " " + (await r.text()).slice(0, 150); continue; }
+      const d = await r.json();
+      const text = d && d.choices && d.choices[0] && d.choices[0].message && d.choices[0].message.content;
+      const advice = extractJson(text);
+      if (!advice || (!advice.trading.length && !advice.wave.length && !advice.curve.length)) {
+        lastErr = model + " -> unparseable advice"; continue;
+      }
+      await kvSet(ck, advice);
+      res.status(200).json({ advice, cached: false, model: model });
+      return;
+    } catch (e) {
+      lastErr = model + " -> " + String(e && e.message || e).slice(0, 120);
     }
-    await kvSet(ck, advice);
-    res.status(200).json({ advice, cached: false, model: MODEL });
-  } catch (e) {
-    res.status(502).json({ error: "llm upstream error" });
   }
+  res.status(502).json({ error: "all models failed", detail: lastErr });
 };

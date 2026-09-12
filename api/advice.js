@@ -5,7 +5,7 @@ const { createHash } = require("node:crypto");
 
 const ALLOWED_ORIGIN = "https://kyle-mcnulty.github.io";
 const PRIMARY_MODEL = process.env.OPENROUTER_MODEL || "google/gemini-2.5-pro";
-const MODEL_FALLBACKS = ["anthropic/claude-sonnet-5", "openai/gpt-5-mini"];
+const MODEL_FALLBACKS = ["anthropic/claude-sonnet-5", "meta-llama/llama-3.3-70b-instruct"];
 const PROMPT_VERSION = "4";
 const CACHE_TTL_SEC = 60 * 60 * 24 * 14; // 14 days, keyed by patch so it self-refreshes
 const RATE_LIMIT_PER_HOUR = 40;
@@ -195,7 +195,7 @@ module.exports = async function handler(req, res) {
     try {
       const r = await fetch("https://openrouter.ai/api/v1/chat/completions", {
         method: "POST",
-        signal: AbortSignal.timeout(40000), // a stalled provider must not stall the function
+        signal: AbortSignal.timeout(60000), // a stalled provider must not stall the function
         headers: {
           Authorization: "Bearer " + process.env.OPENROUTER_API_KEY,
           "Content-Type": "application/json",
@@ -205,7 +205,7 @@ module.exports = async function handler(req, res) {
         body: JSON.stringify({
           model: model,
           messages: [{ role: "system", content: system }, { role: "user", content: user }],
-          max_tokens: 2000,
+          max_tokens: 2200,
           temperature: 0.3,
         }),
       });

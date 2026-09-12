@@ -21,7 +21,7 @@ You can share a matchup: the URL hash holds it, e.g. `#/Ahri/Yasuo/mid` for a 1v
 - Static site on GitHub Pages (this repo's `index.html`).
 - `api/advice.js` is a Vercel serverless function that generates the AI coach breakdown via OpenRouter. The OpenRouter API key lives ONLY as a Vercel environment variable (`OPENROUTER_API_KEY`) - never in this repo, never sent to the browser. CORS is locked to `https://kyle-mcnulty.github.io`.
 - Advice is cached per matchup + patch (Upstash Redis, 14-day TTL; in-memory fallback) and in the browser's localStorage, so each matchup costs one LLM call per patch, not one per page view.
-- Model: `openai/gpt-4o-mini` (override with the `OPENROUTER_MODEL` env var), with automatic fallbacks. If the proxy is unreachable, the page falls back to a built-in rules engine so advice always renders.
+- Model: `anthropic/claude-sonnet-5` (override with the `OPENROUTER_MODEL` env var), with automatic fallbacks (gemini-2.5-pro, gpt-5-mini). If the proxy is unreachable, the page falls back to a built-in rules engine so advice always renders.
 
 ## Data sources (all live, no API key needed)
 
@@ -32,7 +32,7 @@ You can share a matchup: the URL hash holds it, e.g. `#/Ahri/Yasuo/mid` for a 1v
 ## What is real vs generated
 
 - All stats shown are real aggregated ranked data from OP.GG. Bot-lane 2v2 win rates are the per-role matchup win rates (ADC vs ADC, support vs support); OP.GG does not publish combined 2v2 stats.
-- The advice text is generated on the fly from each champion's actual kit (attack range, ability cooldowns, CC/mobility/sustain detection from ability descriptions) plus the win-rate-by-game-length data. It is specific to the two champions picked, but it is rule-based, not hand-written per matchup.
+- The advice text is written per matchup by the AI coach: the proxy sends each champion's full spell list with exact rank-1 cooldowns, mechanical flags (CC, mobility, sustain, defensive tools), attack ranges, live win rates, builds, runes, and win-rate-by-game-length curves, and the model writes the threats, level-by-level plan, trade patterns, wave plan, matchup-specific rune/item adaptations, and spike breakpoints from that data. A rule-based engine in the page covers proxy outages.
 
 ## Known limits / next steps
 

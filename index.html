@@ -621,8 +621,22 @@ function buildCardHtml(me, myData){
 /* ---------- AI advice (LLM via serverless proxy; rule-based engine as fallback) ---------- */
 function kitFacts(kit){
   const c = mainCatch(kit);
+  const flagOf = (s) => {
+    const f = [];
+    if(kit.hardCC.includes(s)) f.push("hard-cc");
+    if(kit.mobility.includes(s)) f.push("mobility");
+    if(kit.sustain.includes(s)) f.push("sustain");
+    if(kit.shields.includes(s)) f.push("shield");
+    if(kit.defensive.includes(s)) f.push("defensive");
+    if(kit.stealth.includes(s)) f.push("stealth");
+    if(kit.slow.includes(s)) f.push("slow");
+    return f;
+  };
   return {
     name: kit.name, tags: kit.tags, range: kit.range, partype: kit.partype,
+    passiveName: kit.passive ? kit.passive.name : null,
+    spells: kit.spells.map(s => ({key: s.key, name: s.name, cdRank1: s.cd1, cdMaxRank: s.cdMax,
+      range: s.range && s.range !== "0" ? s.range : null, flags: flagOf(s)})),
     catchSpell: c ? {name: c.name, key: c.key, cooldown: c.cd1} : null,
     ult: kit.ult ? {name: kit.ult.name, cooldown: kit.ult.cd1} : null,
     ccCount: kit.hardCC.length, mobilityCount: kit.mobility.length,
@@ -649,7 +663,7 @@ function dataFacts(data, lane){
   };
 }
 async function fetchLlmAdvice(payload){
-  const ck = "lc:adv:v3:" + JSON.stringify([payload.patch, payload.mode, payload.lane, payload.me.name, payload.opp.name,
+  const ck = "lc:adv:v4:" + JSON.stringify([payload.patch, payload.mode, payload.lane, payload.me.name, payload.opp.name,
     payload.meSup && payload.meSup.name, payload.oppSup && payload.oppSup.name]);
   try{
     const raw = store.getItem(ck);
@@ -713,7 +727,7 @@ async function run(){
     let card;
     try{
       const adv = await fetchLlmAdvice(payload);
-      card = adviceCardHtml("AI coach breakdown", adv.summary, [["When to trade", adv.trading], ["Wave management", adv.wave], ["Strong vs weak", adv.curve]]);
+      card = adviceCardHtml("AI coach breakdown", adv.summary, [["Enemy threats to track", adv.threats], ["Level by level", adv.levels], ["When to trade", adv.trading], ["Wave management", adv.wave], ["Runes, summoners and items for this matchup", adv.adapt], ["Power spikes and game plan", adv.curve]]);
     }catch(e){
       console.warn("LLM advice failed, using built-in engine", e);
       const adv = buildAdvice(me.name, opp.name, myKit, oppKit, myData, oppData, currentLane);
@@ -766,7 +780,7 @@ async function runDuo(){
     let card;
     try{
       const adv = await fetchLlmAdvice(payload);
-      card = adviceCardHtml("AI coach breakdown - 2v2", adv.summary, [["Engage and kill threat", adv.trading], ["Wave management", adv.wave], ["Early game and scaling", adv.curve]]);
+      card = adviceCardHtml("AI coach breakdown - 2v2", adv.summary, [["Enemy threats to track", adv.threats], ["Level by level", adv.levels], ["Engage and kill threat", adv.trading], ["Wave management", adv.wave], ["Runes, summoners and items for this matchup", adv.adapt], ["Power spikes and game plan", adv.curve]]);
     }catch(e){
       console.warn("LLM advice failed, using built-in engine", e);
       const adv = buildDuoAdvice({meAdc: meAdc.name, meSup: meSup.name, oppAdc: oppAdc.name, oppSup: oppSup.name}, kits);

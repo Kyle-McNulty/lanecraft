@@ -4,9 +4,9 @@
 const { createHash } = require("node:crypto");
 
 const ALLOWED_ORIGIN = "https://kyle-mcnulty.github.io";
-const PRIMARY_MODEL = process.env.OPENROUTER_MODEL || "openai/gpt-4o-mini";
-const MODEL_FALLBACKS = ["meta-llama/llama-3.3-70b-instruct", "~google/gemini-flash-latest"];
-const PROMPT_VERSION = "3";
+const PRIMARY_MODEL = process.env.OPENROUTER_MODEL || "anthropic/claude-sonnet-5";
+const MODEL_FALLBACKS = ["google/gemini-2.5-pro", "openai/gpt-5-mini"];
+const PROMPT_VERSION = "4";
 const CACHE_TTL_SEC = 60 * 60 * 24 * 14; // 14 days, keyed by patch so it self-refreshes
 const RATE_LIMIT_PER_HOUR = 40;
 
@@ -57,10 +57,24 @@ async function rateOk(ip) {
   } catch (e) { return true; }
 }
 
+function spellBrief(s) {
+  // one ability, prompt-friendly: exact cooldowns and mechanical flags from live Data Dragon data
+  const out = {
+    key: s.key, name: s.name,
+    cooldownRank1: s.cdRank1 || undefined,
+    cooldownMaxRank: s.cdMaxRank || undefined,
+    range: s.range && s.range !== "0" ? s.range : undefined,
+    flags: s.flags && s.flags.length ? s.flags : undefined,
+  };
+  return out;
+}
+
 function champBrief(c) {
-  // compact, prompt-friendly champ context; keep token spend tight
+  // compact, prompt-friendly champ context; spell-level detail is what makes the advice specific
   const out = {
     name: c.name, lane: c.lane, roleTags: c.tags, attackRange: c.range, resource: c.partype,
+    passive: c.passiveName,
+    spells: Array.isArray(c.spells) ? c.spells.map(spellBrief) : undefined,
     laneWinRate: c.laneWR, laneRank: c.laneRank,
     keySpellToTrack: c.catchSpell, ultimate: c.ult,
     hasHardCC: c.ccCount, hasMobility: c.mobilityCount, hasSustain: !!c.sustainName, sustainSpell: c.sustainName,
@@ -82,21 +96,41 @@ function buildPrompt(body) {
     matchupWinRate: body.verdict || undefined,
     supportMatchupWinRate: isDuo ? (body.verdictSup || undefined) : undefined,
   };
-  const system = "You are a Challenger-tier League of Legends lane coach writing for a ranked player on the current patch. " +
-    "You know every champion's kit, cooldowns, power spikes, and wave mechanics. " +
-    "Every bullet must be specific to THESE champions: name real spells, real cooldowns, real level timings, real numbers from the data provided. " +
-    "Never write generic filler (\"play safe\", \"ward up\", \"farm well\") without tying it to this exact matchup. " +
+  const laneNote =
+    body.lane === "jungle"
+      ? "This is a jungle matchup: cover pathing (which start and which camps race to first gank), who wins the 3:15 scuttle contest and at what HP/cooldown state, invade and vertical-jungle windows, and which lanes each jungler should play through."
+      : body.lane === "top"
+      ? "This is top lane: cover who controls the first three waves, freeze and slow-push breakpoints, teleport advantages, and how isolated the lane is from jungle help."
+      : body.lane === "mid"
+      ? "This is mid lane: cover roam timings off crashed waves, who gets first move to river fights, and assassin-vs-control-mage style interplay where relevant."
+      : body.lane === "support"
+      ? "This is the support matchup inside a 2v2: cover bush control, engage-vs-poke-vs-enchanter triangle, level 2 all-in math, and roam windows after crashing waves."
+      : body.lane === "adc"
+      ? "Cover the 2v2 as a system: which duo wins the level 1-2 race, whose engage pairs with whose follow-up, and how the support matchup shapes what the ADCs are allowed to do."
+      : "";
+  const system =
+    "You are a Challenger-tier League of Legends coach writing a matchup breakdown for a ranked player on the current patch. " +
+    "You know every champion's kit, exact cooldowns, mana costs, power spikes, common rune pages, and wave mechanics. " +
+    "The JSON data below is live from Riot Data Dragon and OP.GG for THIS patch: when it conflicts with your memory, the data wins. " +
+    "Every bullet must be specific to THESE champions: name actual spells with their rank-1 cooldowns, actual level timings, actual win-rate numbers, actual item and rune names from the data. " +
+    "Matchup-specific interactions (which spell cancels, blocks, or outranges which) are exactly what the player wants. " +
+    "Never write generic filler (\"play safe\", \"ward up\", \"farm well\", \"punish mistakes\") without tying it to a named spell, cooldown, level, or wave state in this exact matchup. " +
     "Plain text only. No markdown, no HTML, no asterisks.";
   const user =
-    "Here is the matchup data (real ranked stats from OP.GG plus kit facts from Riot Data Dragon):\n" +
+    "Here is the matchup data (real ranked stats from OP.GG plus exact kit facts from Riot Data Dragon):\n" +
     JSON.stringify(ctx) +
     "\n\nWrite the coaching breakdown for the player (they control " +
-    (isDuo ? "yourChampions" : "yourChampions[0]") + "). Return ONLY a JSON object, no code fences, exactly this shape:\n" +
-    '{"summary": "one sentence, the single most important gameplan for this matchup, max 25 words",' +
-    '"trading": ["3 to 5 bullets: when to trade and when not to, keyed to enemy spell cooldowns and windows"],' +
-    '"wave": ["2 to 3 bullets: exactly how to play the minion waves in this matchup"],' +
-    '"curve": ["3 to 4 bullets: level/item timings where the matchup swings, and who wins when"]}' +
-    "\nEach bullet max 40 words. Use the stats: if the win rate favors one side, say what the favored side must do to convert it and what the other side punishes.";
+    (isDuo ? "yourChampions" : "yourChampions[0]") + "). " + laneNote +
+    " Return ONLY a JSON object, no code fences, exactly this shape:\n" +
+    '{"summary": "2 sentences max: the single most important gameplan for this matchup and the condition that decides who wins it",' +
+    '"threats": ["3 to 4 bullets: the enemy spells that actually decide this matchup, each with its exact rank-1 cooldown from the data, what it enables, and the exact punish window in seconds when it is down"],' +
+    '"levels": ["4 to 5 bullets walking through levels 1, 2, 3, and 6 explicitly: who wins each stage and why, keyed to which spells each champion has at that point"],' +
+    '"trading": ["3 to 5 bullets: concrete trade patterns - which of your spells to use when, which enemy cooldown to bait first, auto-attack range math where it matters"],' +
+    '"wave": ["2 to 3 bullets: exactly how to play the first three waves and the default wave state to hold, keyed to each side\'s waveclear and engage threat"],' +
+    '"adapt": ["2 to 3 bullets: matchup-specific changes to the displayed runes, summoner spells, or item build - name what to swap and why (e.g. a defensive shard vs their burst, an early cloth armor, holding exhaust for their ult)"],' +
+    '"curve": ["3 to 4 bullets: item and level breakpoints where the matchup swings, using the win-rate-by-game-length numbers, and what the losing side must do to flip it"]}' +
+    "\nEach bullet max 45 words. Use the stats: if the win rate favors one side, say what the favored side must do to convert it and what the other side punishes. " +
+    "For duo mode, threats/levels/trading cover all four champions and name who does what.";
   return { system, user };
 }
 
@@ -111,9 +145,12 @@ function extractJson(text) {
     if (!o || typeof o !== "object") return null;
     const clean = (arr, n) => Array.isArray(arr) ? arr.filter(x => typeof x === "string" && x.trim()).slice(0, n) : [];
     return {
-      summary: typeof o.summary === "string" ? o.summary.trim().slice(0, 300) : "",
+      summary: typeof o.summary === "string" ? o.summary.trim().slice(0, 500) : "",
+      threats: clean(o.threats, 4),
+      levels: clean(o.levels, 5),
       trading: clean(o.trading, 5),
       wave: clean(o.wave, 3),
+      adapt: clean(o.adapt, 3),
       curve: clean(o.curve, 4),
     };
   } catch (e) { return null; }
@@ -138,7 +175,7 @@ module.exports = async function handler(req, res) {
   if (!body.patch || !body.lane || names.some(n => !n || typeof n !== "string")) {
     res.status(400).json({ error: "missing fields" }); return;
   }
-  if (!/^[A-Za-z' .-]{2,30}$/.test(names.join(""))) { res.status(400).json({ error: "bad champion names" }); return; }
+  if (!/^[A-Za-z' .-]{2,60}$/.test(names.join(""))) { res.status(400).json({ error: "bad champion names" }); return; }
 
   const ip = (req.headers["x-forwarded-for"] || "anon").toString().split(",")[0].trim();
   if (!(await rateOk(ip))) { res.status(429).json({ error: "rate limited" }); return; }
@@ -147,7 +184,7 @@ module.exports = async function handler(req, res) {
     createHash("sha1").update(names.join("|").toLowerCase()).digest("hex").slice(0, 16);
 
   const hit = await kvGet(ck);
-  if (hit) { res.status(200).json({ advice: hit, cached: true, model: "cache" }); return; }
+  if (hit) { res.status(200).json({ advice: hit, cached: true, model: "cache", v: PROMPT_VERSION }); return; }
 
   if (!process.env.OPENROUTER_API_KEY) { res.status(503).json({ error: "advice backend not configured" }); return; }
 
@@ -167,19 +204,19 @@ module.exports = async function handler(req, res) {
         body: JSON.stringify({
           model: model,
           messages: [{ role: "system", content: system }, { role: "user", content: user }],
-          max_tokens: 1100,
-          temperature: 0.4,
+          max_tokens: 2600,
+          temperature: 0.3,
         }),
       });
       if (!r.ok) { lastErr = model + " -> HTTP " + r.status + " " + (await r.text()).slice(0, 150); continue; }
       const d = await r.json();
       const text = d && d.choices && d.choices[0] && d.choices[0].message && d.choices[0].message.content;
       const advice = extractJson(text);
-      if (!advice || (!advice.trading.length && !advice.wave.length && !advice.curve.length)) {
+      if (!advice || (!advice.trading.length && !advice.wave.length && !advice.curve.length && !advice.threats.length)) {
         lastErr = model + " -> unparseable advice"; continue;
       }
       await kvSet(ck, advice);
-      res.status(200).json({ advice, cached: false, model: model });
+      res.status(200).json({ advice, cached: false, model: model, v: PROMPT_VERSION });
       return;
     } catch (e) {
       lastErr = model + " -> " + String(e && e.message || e).slice(0, 120);

@@ -6,7 +6,7 @@ const { createHash } = require("node:crypto");
 const ALLOWED_ORIGIN = "https://kyle-mcnulty.github.io";
 const PRIMARY_MODEL = process.env.OPENROUTER_MODEL || "google/gemini-2.5-pro";
 const MODEL_FALLBACKS = ["anthropic/claude-sonnet-5", "meta-llama/llama-3.3-70b-instruct"];
-const PROMPT_VERSION = "4";
+const PROMPT_VERSION = "4b";
 const CACHE_TTL_SEC = 60 * 60 * 24 * 14; // 14 days, keyed by patch so it self-refreshes
 const RATE_LIMIT_PER_HOUR = 40;
 
@@ -32,11 +32,12 @@ async function kvGet(key) {
     return d.result ? JSON.parse(d.result) : null;
   } catch (e) { return null; }
 }
-async function kvSet(key, val) {
+async function kvSet(key, val, ttlSec) {
+  const ttl = ttlSec || CACHE_TTL_SEC;
   memoryCache.set(key, val);
   if (!kvReady()) return;
   try {
-    await fetch(process.env.KV_REST_API_URL + "/set/" + encodeURIComponent(key) + "/" + encodeURIComponent(JSON.stringify(val)) + "/ex/" + CACHE_TTL_SEC, {
+    await fetch(process.env.KV_REST_API_URL + "/set/" + encodeURIComponent(key) + "/" + encodeURIComponent(JSON.stringify(val)) + "/ex/" + ttl, {
       method: "POST",
       headers: { Authorization: "Bearer " + process.env.KV_REST_API_TOKEN },
     });
@@ -216,7 +217,8 @@ module.exports = async function handler(req, res) {
       if (!advice || (!advice.trading.length && !advice.wave.length && !advice.curve.length && !advice.threats.length)) {
         lastErr = model + " -> unparseable advice"; continue;
       }
-      await kvSet(ck, advice);
+      // weakest-model answers are cached briefly so they self-refresh when stronger providers recover
+      await kvSet(ck, advice, model.indexOf("llama") !== -1 ? 60 * 60 * 24 : CACHE_TTL_SEC);
       res.status(200).json({ advice, cached: false, model: model, v: PROMPT_VERSION });
       return;
     } catch (e) {

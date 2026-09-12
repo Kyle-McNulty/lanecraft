@@ -4,8 +4,8 @@
 const { createHash } = require("node:crypto");
 
 const ALLOWED_ORIGIN = "https://kyle-mcnulty.github.io";
-const PRIMARY_MODEL = process.env.OPENROUTER_MODEL || "anthropic/claude-sonnet-5";
-const MODEL_FALLBACKS = ["google/gemini-2.5-pro", "openai/gpt-5-mini"];
+const PRIMARY_MODEL = process.env.OPENROUTER_MODEL || "google/gemini-2.5-pro";
+const MODEL_FALLBACKS = ["anthropic/claude-sonnet-5", "openai/gpt-5-mini"];
 const PROMPT_VERSION = "4";
 const CACHE_TTL_SEC = 60 * 60 * 24 * 14; // 14 days, keyed by patch so it self-refreshes
 const RATE_LIMIT_PER_HOUR = 40;

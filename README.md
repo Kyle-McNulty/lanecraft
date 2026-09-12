@@ -21,7 +21,7 @@ You can share a matchup: the URL hash holds it, e.g. `#/Ahri/Yasuo/mid` for a 1v
 - Static site on GitHub Pages (this repo's `index.html`).
 - `api/advice.js` is a Vercel serverless function that generates the AI coach breakdown via OpenRouter. The OpenRouter API key lives ONLY as a Vercel environment variable (`OPENROUTER_API_KEY`) - never in this repo, never sent to the browser. CORS is locked to `https://kyle-mcnulty.github.io`.
 - Advice is cached per matchup + patch (Upstash Redis, 14-day TTL; in-memory fallback) and in the browser's localStorage, so each matchup costs one LLM call per patch, not one per page view.
-- Model: `anthropic/claude-sonnet-5` (override with the `OPENROUTER_MODEL` env var), with automatic fallbacks (gemini-2.5-pro, gpt-5-mini). If the proxy is unreachable, the page falls back to a built-in rules engine so advice always renders.
+- Model: `google/gemini-2.5-pro` (override with the `OPENROUTER_MODEL` env var), with automatic fallbacks (claude-sonnet-5, gpt-5-mini). If the proxy is unreachable, the page falls back to a built-in rules engine so advice always renders.
 
 ## Data sources (all live, no API key needed)
 

@@ -195,6 +195,7 @@ module.exports = async function handler(req, res) {
     try {
       const r = await fetch("https://openrouter.ai/api/v1/chat/completions", {
         method: "POST",
+        signal: AbortSignal.timeout(40000), // a stalled provider must not stall the function
         headers: {
           Authorization: "Bearer " + process.env.OPENROUTER_API_KEY,
           "Content-Type": "application/json",
@@ -204,7 +205,7 @@ module.exports = async function handler(req, res) {
         body: JSON.stringify({
           model: model,
           messages: [{ role: "system", content: system }, { role: "user", content: user }],
-          max_tokens: 2600,
+          max_tokens: 2000,
           temperature: 0.3,
         }),
       });
